@@ -14,6 +14,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import EnvironmentManager from '../core/environment.js';
+import HttpClient from '../core/http.js';
 import MemoryBuilderError from '../core/error.js';
 import TimeGenerator from './time.js';
 
@@ -37,26 +38,6 @@ class OutputGenerator {
     this.container = container;
     this.environmentManager = new EnvironmentManager(config.settings);
     this.profileName = profileName || config.settings.profile;
-  }
-
-  /**
-   * Finds a skill and its plugin info by skill key
-   *
-   * @private
-   * @param {string} skillKey - Skill key to find (e.g., 'init', 'methodology')
-   * @returns {Object|null} Object with plugin and skill info, or null if not found
-   */
-  #findSkillByKey(skillKey) {
-    for (const pluginList of Object.values(this.config.settings.plugins)) {
-      for (const { plugin, skills } of pluginList) {
-        if (skills?.[skillKey]) {
-          const pluginName = plugin.name;
-          const pluginVersion = plugin.version;
-          return { pluginName, pluginVersion, skillName: skills[skillKey] };
-        }
-      }
-    }
-    return null;
   }
 
   /**
@@ -107,6 +88,48 @@ class OutputGenerator {
     } catch (error) {
       throw new MemoryBuilderError(`Failed to create ${skillName} zip archive: ${error.message}`, 'ZIP_CREATE_ERROR');
     }
+  }
+
+  /**
+   * Fetches geolocation data from environment or API
+   *
+   * @private
+   * @param {string} [geolocation] - Optional geolocation JSON string
+   * @returns {Promise<Object>} Object with city, country, timezone (empty object on failure)
+   */
+  async #fetchGeolocation(geolocation) {
+    if (geolocation) {
+      const location = JSON.parse(geolocation.replace(/'/g, '"'));
+      return { city: location.city, country: location.country, timezone: location.timezone };
+    }
+    const httpClient = new HttpClient({ isContainer: this.environmentManager.isClaudeContainer() });
+    const response = await httpClient.fetch(this.config.settings.geolocation.service);
+    const data = await response.json();
+    return {
+      city: data.city,
+      country: new Intl.DisplayNames(['en'], { type: 'region' }).of(data.country),
+      timezone: data.timezone
+    };
+  }
+
+  /**
+   * Finds a skill and its plugin info by skill key
+   *
+   * @private
+   * @param {string} skillKey - Skill key to find (e.g., 'init', 'methodology')
+   * @returns {Object|null} Object with plugin and skill info, or null if not found
+   */
+  #findSkillByKey(skillKey) {
+    for (const pluginList of Object.values(this.config.settings.plugins)) {
+      for (const { plugin, skills } of pluginList) {
+        if (skills?.[skillKey]) {
+          const pluginName = plugin.name;
+          const pluginVersion = plugin.version;
+          return { pluginName, pluginVersion, skillName: skills[skillKey] };
+        }
+      }
+    }
+    return null;
   }
 
   /**
@@ -181,10 +204,10 @@ class OutputGenerator {
    * @param {Object} profiles - Hierarchical profile dictionary
    * @param {boolean} [returnOnly] - Return object instead of printing to stdout
    * @param {boolean} [skipInject] - Skip injecting data into SKILL.md
-   * @returns {Object|boolean} Output object if returnOnly, otherwise success status
+   * @returns {Promise<Object|boolean>} Output object if returnOnly, otherwise success status
    * @throws {MemoryBuilderError} When generation fails
    */
-  generate(instructions, profiles, returnOnly = false, skipInject = false) {
+  async generate(instructions, profiles, returnOnly = false, skipInject = false) {
     if (typeof instructions !== 'object' || instructions === null) {
       throw new MemoryBuilderError('Instructions must be an object', 'INVALID_INSTRUCTIONS');
     }
@@ -214,26 +237,30 @@ class OutputGenerator {
         this.#injectData('instructions', instructionsData);
         this.#injectData('memory', memoryData);
       }
-      return this.generateOutput(paths.sort(), returnOnly);
+      return await this.generateOutput(paths.sort(), returnOnly);
     }
     if (!skipInject) {
       this.#injectData('instructions', instructionsData);
       this.#injectData('memory', memoryData);
     }
-    return this.generateOutput(null, returnOnly);
+    return await this.generateOutput(null, returnOnly);
   }
 
   /**
-   * Generates output with profile and timestamp
+   * Generates output with profile, timestamp, and location
    *
    * @param {Array} [paths] - Optional array of generated file paths
    * @param {boolean} [returnOnly] - Return object instead of printing to stdout
-   * @returns {Object|boolean} Output object if returnOnly, otherwise success status
+   * @returns {Promise<Object|boolean>} Output object if returnOnly, otherwise success status
    * @throws {MemoryBuilderError} When generation fails
    */
-  generateOutput(paths = null, returnOnly = false) {
+  async generateOutput(paths = null, returnOnly = false) {
+    const geolocation = process.env.FRAMEWORK_GEOLOCATION;
+    const { city, country, timezone } = await this.#fetchGeolocation(geolocation).catch(() => ({}));
     const timeGenerator = new TimeGenerator(this.config);
-    const timestamp = timeGenerator.generate();
+    const timestamp = timeGenerator.generate(timezone);
+    if (city) timestamp.city = city;
+    if (country) timestamp.country = country;
     const profile = this.profileName;
     const output = paths ? { paths, profile, timestamp } : { profile, timestamp };
     if (returnOnly) {

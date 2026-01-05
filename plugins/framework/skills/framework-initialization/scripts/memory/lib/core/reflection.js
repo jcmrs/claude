@@ -163,7 +163,12 @@ class Reflection {
         entries.push(`${prefix}/${item.name}`);
       }
     }
-    return { entries: entries.sort() };
+    return {
+      entries: entries.sort((a, b) => {
+        const isDigitFile = path => /^\d/.test(path.split('/').pop());
+        return isDigitFile(a) - isDigitFile(b);
+      })
+    };
   }
 }
 
